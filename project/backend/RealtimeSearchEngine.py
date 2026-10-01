@@ -30,6 +30,15 @@ else:
     client = None
     print('[RealtimeSearchEngine] Warning: Groq API key not found; real-time LLM features will be disabled.')
 
+# PERF FIX: match the fast-model default used elsewhere. This call also
+# has to wait on a SerpAPI web search first, so keeping the model itself
+# fast matters even more here.
+CHAT_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+
+# Same reasoning as chatbot.py / assistant_controller.py — don't resend
+# an ever-growing chat log on every request.
+MAX_HISTORY_MESSAGES = 20
+
 # ================= SYSTEM =================
 System = f"""Hello, I am {Username}, You are a very accurate and advanced AI chatbot named {Assistantname} which has real-time up-to-date information from the internet.
 *** Provide Answers In a Professional Way, make sure to add full stops, commas, question marks, and use proper grammar.***
@@ -51,7 +60,7 @@ def WebSearch(query):   # 🔹 renamed ONLY to avoid recursion
         "hl": "en",
         "gl": "in",
         "api_key": SERPAPI_KEY,
-        "num": 5
+        "num": 3  # fewer results = smaller prompt = faster reply, still plenty of context
     }
 
     search = GoogleSearch(params)
@@ -116,6 +125,9 @@ def RealtimeSearchEngine(UserInput):
     with open(CHATLOG_PATH, "r") as f:
         messages = load(f)
 
+    if len(messages) > MAX_HISTORY_MESSAGES:
+        messages = messages[-MAX_HISTORY_MESSAGES:]
+
     messages.append({"role": "user", "content": UserInput})
 
     SystemChatBot.append({
@@ -128,11 +140,10 @@ def RealtimeSearchEngine(UserInput):
         return "[RealtimeSearchEngine] Groq client not configured. Set GroqAPIKey or GROQ_API_KEY to enable real-time LLM searches."
 
     completion = client.chat.completions.create(
-        # model="llama-3.3-70b-versatile",
-        model="openai/gpt-oss-120b",
+        model=CHAT_MODEL,
         messages=SystemChatBot + [{"role": "system", "content": Information()}] + messages,
         temperature=0.7,
-        max_tokens=2048,
+        max_tokens=800,
         top_p=1,
         stream=True
     )
@@ -157,3 +168,4 @@ if __name__ == "__main__":
     while True:
         propmt = input("User: ")
         print(RealtimeSearchEngine(UserInput=propmt))
+        

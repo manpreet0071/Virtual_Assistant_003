@@ -294,6 +294,7 @@ import threading
 import time
 import os
 import re
+import queue
 import unicodedata
 
 import pygame
@@ -357,6 +358,55 @@ _last_spoken_text = None
 _tts_lock = threading.Lock()
 
 _generation_lock = threading.Lock()
+
+# BUG FIX / PERF: chatbot.py now calls TTS() once per finished sentence
+# so speech can start before the whole reply has finished generating.
+# The old TTS() stopped whatever was currently playing and jumped
+# straight into the new text on every call — fine for "speak this one
+# reply", but wrong for "speak these sentences in order without
+# chopping each other off". A small queue + one persistent worker
+# thread lets sentences play back-to-back in order, while a single new
+# *reply* (see TTS_interrupt()) can still cut in and clear anything
+# still queued from a previous, no-longer-relevant reply.
+_speech_queue: "queue.Queue[str]" = queue.Queue()
+_worker_started = False
+_worker_lock = threading.Lock()
+
+
+def _speech_worker():
+    while True:
+        text = _speech_queue.get()
+        try:
+            asyncio.run(_generate_audio_async(text))
+            _play_audio()
+        except Exception as e:
+            print(f"TTS Generation/Playback Error: {e}")
+        finally:
+            _speech_queue.task_done()
+
+
+def _ensure_worker_running():
+    global _worker_started
+    with _worker_lock:
+        if not _worker_started:
+            threading.Thread(target=_speech_worker, daemon=True).start()
+            _worker_started = True
+
+
+def TTS_interrupt():
+    """Clear any not-yet-spoken sentences (e.g. a brand new question
+    came in while the previous answer was still being read out)."""
+    try:
+        while True:
+            _speech_queue.get_nowait()
+            _speech_queue.task_done()
+    except queue.Empty:
+        pass
+    try:
+        if pygame.mixer.music.get_busy():
+            pygame.mixer.music.stop()
+    except Exception:
+        pass
 
 
 # --------------------------------------------------
@@ -470,32 +520,16 @@ def _play_audio():
 # WORKER
 # --------------------------------------------------
 
-def _tts_worker(text: str):
-
-    with _generation_lock:
-
-        try:
-
-            asyncio.run(
-                _generate_audio_async(text)
-            )
-
-        except Exception as e:
-
-            print(
-                f"TTS Generation Error: {e}"
-            )
-
-            return
-
-    _play_audio()
-
-
 # --------------------------------------------------
 # PUBLIC API
 # --------------------------------------------------
 
 def TTS(text: str):
+    """Queue text to be spoken. Safe to call multiple times quickly in a
+    row (e.g. once per sentence as an LLM reply streams in) — each call
+    is spoken in order after the previous one finishes, instead of
+    interrupting it.
+    """
 
     global _last_spoken_text
 
@@ -516,33 +550,11 @@ def TTS(text: str):
     if not text:
         return
 
-    # Don't repeat same response
+    # Don't repeat same sentence twice in a row
     if text == _last_spoken_text:
         return
 
     _last_spoken_text = text
 
-    # Stop currently playing audio
-    try:
-
-        if pygame.mixer.music.get_busy():
-
-            pygame.mixer.music.stop()
-
-            try:
-                pygame.mixer.music.unload()
-            except:
-                pass
-
-    except Exception as e:
-
-        print(
-            f"[TTS] Stop error: {e}"
-        )
-
-    # Start background TTS
-    threading.Thread(
-        target=_tts_worker,
-        args=(text,),
-        daemon=True
-    ).start()
+    _ensure_worker_running()
+    _speech_queue.put(text)

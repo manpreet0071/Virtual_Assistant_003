@@ -1,11 +1,26 @@
 import re
 import time
+import os
 import webbrowser
 import pyautogui
 import pyperclip
 from AppOpener import open as appopen
 import cv2
 pyautogui.FAILSAFE = True
+
+# BUG FIX: these icon images used to be loaded from a hardcoded absolute
+# path on one specific machine ("d:/VIRTUAL _ANIME_ASSISTANT/..."). On
+# any other computer (or a different folder name), cv2.imread() would
+# silently return None instead of raising an error, so universal_call()
+# would just print "[ERROR] Call menu not found" and voice/video calls
+# would quietly never work. Building the path from this file's own
+# location matches how every other module in this project (TTS.py,
+# RealtimeSearchEngine.py, chatbot.py) already finds its Data folder.
+_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Data")
+
+CALL_MENU_ICON_PATH = os.path.join(_DATA_DIR, "call_menu.png")
+VOICE_ICON_PATH = os.path.join(_DATA_DIR, "voice_call.png")
+VIDEO_ICON_PATH = os.path.join(_DATA_DIR, "video_call.png")
 
 # Check if OpenCV is available for confidence-based image matching
 try:
@@ -137,20 +152,24 @@ def send_message_desktop(message):
 # UNIVERSAL CALL (RESIZE SAFE)
 # =========================
 
-import time
-import pyautogui
-
 def universal_call(call_type="voice", timeout=8):
     """
     call_type: 'voice' or 'video'
     """
 
     # Step 1: Call menu button
-    call_menu_icon = cv2.imread(r"d:/VIRTUAL _ANIME_ASSISTANT/project_s/backend/Data/call_menu.png")   # camera + call icon (top button)
+    call_menu_icon = cv2.imread(CALL_MENU_ICON_PATH)   # camera + call icon (top button)
 
     # Step 2: Dropdown options
-    voice_icon = cv2.imread(r"d:/VIRTUAL _ANIME_ASSISTANT/project_s/backend/Data/voice_call.png")
-    video_icon = cv2.imread(r"d:/VIRTUAL _ANIME_ASSISTANT/project_s/backend/Data/video_call.png")
+    voice_icon = cv2.imread(VOICE_ICON_PATH)
+    video_icon = cv2.imread(VIDEO_ICON_PATH)
+
+    if call_menu_icon is None or voice_icon is None or video_icon is None:
+        print(
+            f"[ERROR] Could not load call icon images from {_DATA_DIR} — "
+            "make sure call_menu.png, voice_call.png and video_call.png exist there."
+        )
+        return False
 
     target_icon = voice_icon if call_type == "voice" else video_icon
 

@@ -1583,6 +1583,16 @@ class MainWindow(QWidget):
     # SPEAK
     # ========================================================
 
+    # NOTE (perf/correctness): this is the single place that should
+    # speak a reply for the GUI. backend.assistant_controller.MainExecution
+    # (the normal on_query callback) now returns text WITHOUT speaking
+    # it itself, so this is the only voice you'll hear in the common
+    # case — previously the backend spoke the answer via edge_tts AND
+    # this method spoke the same text again via pyttsx3, so replies
+    # were effectively said twice back-to-back. If you wire in a
+    # different backend function that does its own TTS internally,
+    # don't also call self.speak() on its result, or you'll reintroduce
+    # that double-speaking delay.
     def speak(
         self,
         text: str

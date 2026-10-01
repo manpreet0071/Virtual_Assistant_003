@@ -7,15 +7,6 @@ import base64
 from random import choice
 from threading import Lock
 
-# # --------------------------------------------------
-# # PATH SETUP (CRITICAL)
-# # --------------------------------------------------
-# BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-# BACKEND_DIR = os.path.join(BASE_DIR, "backend")
-
-# sys.path.insert(0, BASE_DIR)
-# sys.path.insert(0, BACKEND_DIR)
-
 # --------------------------------------------------
 # PATH SETUP
 # --------------------------------------------------
@@ -31,6 +22,10 @@ sys.path.insert(0, PROJECT_ROOT)
 # --------------------------------------------------
 # IMPORTS
 # --------------------------------------------------
+
+# NEW: Used for PC local time
+from datetime import datetime
+
 from backend.Automation_engine import Run as AutomationEngine
 from backend.chatbot import ChatBotAI, AnswerModifier
 from backend.llm import ask_llm as Model
@@ -48,7 +43,7 @@ from dotenv import load_dotenv, set_key
 # --------------------------------------------------
 # ENV & GLOBAL STATE
 # --------------------------------------------------
-# load_dotenv(os.path.join(BACKEND_DIR, ".env"))
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(BASE_DIR)
 
@@ -78,17 +73,46 @@ professional_responses = [
 # --------------------------------------------------
 # UTILITIES
 # --------------------------------------------------
+
 def UniversalTranslator(text: str) -> str:
     if "en" in InputLanguage.lower():
         return text.capitalize()
     return mt.translate(text, "en", "auto").capitalize()
 
+
 def QueryModifier(text: str) -> str:
     return text.strip()
+
+
+# --------------------------------------------------
+# TIME-BASED STARTUP GREETING
+# --------------------------------------------------
+# NEW
+# This uses the actual local time of the PC running Emily.
+# It does NOT ask the LLM to guess the time.
+
+def startup_greeting():
+    hour = datetime.now().hour
+
+    if 5 <= hour < 12:
+        greeting = "Good morning, sir."
+    elif 12 <= hour < 17:
+        greeting = "Good afternoon, sir."
+    else:
+        greeting = "Good evening, sir."
+
+    print("Emily:", greeting)
+
+    try:
+        TTS(greeting)
+    except Exception as e:
+        print("❌ Startup Greeting TTS Error:", e)
+
 
 # --------------------------------------------------
 # CORE EXECUTION
 # --------------------------------------------------
+
 def MainExecution(query: str):
     global state
 
@@ -98,6 +122,7 @@ def MainExecution(query: str):
     query = QueryModifier(UniversalTranslator(query))
 
     # ---------------- WHATSAPP FAST PATH ----------------
+
     if "whatsapp" in query.lower():
         try:
             state = "Automation..."
@@ -118,9 +143,11 @@ def MainExecution(query: str):
 
         finally:
             state = "Available..."
+
         return
 
     # ---------------- NORMAL FLOW ----------------
+
     state = "Thinking..."
 
     try:
@@ -128,6 +155,7 @@ def MainExecution(query: str):
         print("LLM Result:", result)
 
         # ---------- AI ONLY ----------
+
         if isinstance(result, dict) and result.get("action", {}).get("type") == "none":
             answer = AnswerModifier(ChatBotAI(query))
             state = "Answering..."
@@ -135,23 +163,42 @@ def MainExecution(query: str):
             return
 
         # ---------- AUTOMATION ----------
+
         state = "Automation..."
+
         command = result.get("action", {}).get("command", "")
 
         automation_prefixes = (
-            "open ", "close ", "play ", "system ",
-            "write ", "code ", "make ", "google search ", "search ",
-            "youtube search ", "search on youtube ",
+            "open ",
+            "close ",
+            "play ",
+            "system ",
+            "write ",
+            "code ",
+            "make ",
+            "google search ",
+            "search ",
+            "youtube search ",
+            "search on youtube ",
         )
 
         if command.lower().startswith(automation_prefixes):
-            # 1️⃣ High-level automation (open/close/play/system/content/search)
+
+            # 1️⃣ High-level automation
+            # open/close/play/system/content/search
+
             AutomationEngine(command)
+
         else:
-            # 2️⃣ Everything else falls back to the general system command router
-            # (whatsapp, calls, email, urls, free-form search, etc.) — this is a
-            # synchronous function, so it's called directly, not via asyncio.run.
-            SystemAutomation(command, raw_text=query, model_output=str(result))
+
+            # 2️⃣ Everything else falls back to
+            # the general system command router
+
+            SystemAutomation(
+                command,
+                raw_text=query,
+                model_output=str(result)
+            )
 
         response = choice(professional_responses)
 
@@ -164,6 +211,7 @@ def MainExecution(query: str):
             )
 
         state = "Answering..."
+
         TTS(response)
 
     except Exception as e:
@@ -172,14 +220,18 @@ def MainExecution(query: str):
     finally:
         state = "Available..."
 
+
 # --------------------------------------------------
 # VOICE LISTENER
 # --------------------------------------------------
+
 def voice_listener():
+
     recognizer = sr.Recognizer()
     mic = sr.Microphone()
 
     # Recognition settings
+
     recognizer.energy_threshold = 300
     recognizer.dynamic_energy_threshold = True
     recognizer.pause_threshold = 0.8
@@ -187,12 +239,18 @@ def voice_listener():
     recognizer.non_speaking_duration = 0.5
 
     with mic as source:
-        recognizer.adjust_for_ambient_noise(source, duration=1)
+
+        recognizer.adjust_for_ambient_noise(
+            source,
+            duration=1
+        )
 
         print("🎤 Voice listener started")
 
         while True:
+
             try:
+
                 print("🎧 Listening...")
 
                 audio = recognizer.listen(
@@ -211,6 +269,7 @@ def voice_listener():
                 # ------------------------------------------
                 # ALWAYS accept the next recognized command
                 # ------------------------------------------
+
                 t = threading.Thread(
                     target=MainExecution,
                     args=(text,),
@@ -218,69 +277,144 @@ def voice_listener():
                 )
 
                 t.start()
+
                 working.append(t)
 
                 # Remove finished threads
+
                 working[:] = [
-                    thread for thread in working
+                    thread
+                    for thread in working
                     if thread.is_alive()
                 ]
 
             except sr.UnknownValueError:
+
                 # Speech was detected but not understood
+
                 continue
 
             except sr.RequestError as e:
-                print("❌ Speech Recognition Error:", e)
+
+                print(
+                    "❌ Speech Recognition Error:",
+                    e
+                )
 
             except Exception as e:
-                print("❌ Voice Error:", e)
+
+                print(
+                    "❌ Voice Error:",
+                    e
+                )
+
 
 # --------------------------------------------------
 # EEL EXPOSED FUNCTIONS
 # --------------------------------------------------
+
 @eel.expose
 def js_mic(text):
-    t = threading.Thread(target=MainExecution, args=(text,), daemon=True)
+
+    t = threading.Thread(
+        target=MainExecution,
+        args=(text,),
+        daemon=True
+    )
+
     t.start()
+
     working.append(t)
+
 
 @eel.expose
 def js_state():
     return state
 
+
 @eel.expose
 def js_language():
     return InputLanguage
+
 
 @eel.expose
 def js_assistantname():
     return Assistantname
 
+
 @eel.expose
 def js_setvalues(GroqApi, AssistantName, Username):
-    env_path = os.path.join(BACKEND_DIR, ".env")
+
+    env_path = os.path.join(
+        BACKEND_DIR,
+        ".env"
+    )
 
     if GroqApi:
-        set_key(env_path, "GROQ_API_KEY", GroqApi)
+        set_key(
+            env_path,
+            "GROQ_API_KEY",
+            GroqApi
+        )
+
     if AssistantName:
-        set_key(env_path, "AssistantName", AssistantName)
+        set_key(
+            env_path,
+            "AssistantName",
+            AssistantName
+        )
+
     if Username:
-        set_key(env_path, "NickName", Username)
+        set_key(
+            env_path,
+            "NickName",
+            Username
+        )
+
 
 # --------------------------------------------------
 # IMAGE CAPTURE
 # --------------------------------------------------
+
 @eel.expose
 def js_capture(image_data):
-    image_bytes = base64.b64decode(image_data.split(",")[1])
-    with open(os.path.join(BASE_DIR, "capture.png"), "wb") as f:
+
+    image_bytes = base64.b64decode(
+        image_data.split(",")[1]
+    )
+
+    with open(
+        os.path.join(BASE_DIR, "capture.png"),
+        "wb"
+    ) as f:
+
         f.write(image_bytes)
+
 
 # --------------------------------------------------
 # APP START
 # --------------------------------------------------
+
 if __name__ == "__main__":
+
     eel.init("web")
-    threading.Thread(target=voice_listener, daemon=True).start()
-    eel.start("spider.html", port=8000)
+
+    # NEW:
+    # Speak a greeting according to the PC's local time.
+    # This happens only once when the application starts.
+
+    startup_greeting()
+
+    # Existing voice listener
+
+    threading.Thread(
+        target=voice_listener,
+        daemon=True
+    ).start()
+
+    # Existing Eel application
+
+    eel.start(
+        "spider.html",
+        port=8000
+    )

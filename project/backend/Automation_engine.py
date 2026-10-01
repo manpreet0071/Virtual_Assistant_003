@@ -197,14 +197,21 @@ def OpenApp(app, sess=requests.Session()):
 # OpenApp("github")
 
 def CloseApp(app):
+    # BUG FIX: this used to silently fall through with no return value
+    # (implicit None) for Chrome, instead of a proper True/False, which
+    # made callers unable to tell whether the "close" actually happened.
+    # Chrome is still deliberately skipped here (closing it can kill
+    # unrelated tabs/windows), but we now report that clearly.
     if "chrome" in app:
-        pass
-    else:
-        try:
-            close(app,match_closest=True,output=True,throw_error=True)
-            return True
-        except:
-            return False
+        print(f"[Automation_engine] Skipping close for '{app}' (Chrome close via AppOpener is unreliable).")
+        return False
+
+    try:
+        close(app, match_closest=True, output=True, throw_error=True)
+        return True
+    except Exception as e:
+        print(f"[Automation_engine] Could not close '{app}': {e}")
+        return False
         
 # CloseApp("whatsapp")
         
@@ -337,4 +344,3 @@ def Run(commands):
 
 # if __name__ == "__main__":
     # asyncio.run(Automation(["open yt","open insta","open telegram","play hanuman chilsa","search rcb","write a poem"]))
-            

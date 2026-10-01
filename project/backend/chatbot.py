@@ -291,23 +291,31 @@ from RealtimeSearchEngine import RealtimeSearchEngine
 # =========================================================
 # PROJECT PATH
 # =========================================================
+# BUG FIX: the old "parents[2] / project / backend / Data" calculation
+# assumed one very specific folder nesting. If the project isn't laid
+# out exactly that way, this silently computes a DIFFERENT ChatLog.json
+# than the one assistant_controller.py and RealtimeSearchEngine.py use
+# (they both just use "this file's own folder / Data"). That mismatch
+# means the conversation history each module sees can disagree, and
+# every mismatch also means the model gets fed less/incorrect context.
+# Using the same simple, file-relative pattern everywhere keeps all
+# three modules reading and writing the exact same log.
 
-# Current file:
-# project_yui/project/backend/chatbot.py
-#
-# parents[0] = backend
-# parents[1] = project
-# parents[2] = project_yui
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+BASE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = BASE_DIR.parent
 
 ENV_FILE = PROJECT_ROOT / ".env"
 
-DATA_DIR = PROJECT_ROOT / "project" / "backend" / "Data"
+DATA_DIR = BASE_DIR / "Data"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 CHATLOG_PATH = DATA_DIR / "ChatLog.json"
+
+# Same reasoning as assistant_controller.py: cap how much history gets
+# resent to the model on every turn, so replies don't get slower and
+# slower as a conversation grows.
+MAX_HISTORY_MESSAGES = 20
 
 
 # =========================================================
@@ -351,6 +359,12 @@ else:
     except Exception as e:
         print(f"[llm] Failed to initialize Groq client: {e}")
         client = None
+
+# PERF FIX: same reasoning as llm.py — "openai/gpt-oss-120b" is a large
+# model and noticeably slower than a small Groq model for short,
+# conversational replies. Default to a fast model; override with
+# GROQ_MODEL in .env if you need more reasoning power for some replies.
+CHAT_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 
 
 # =========================================================
@@ -407,6 +421,34 @@ DefaultMessage = [
         )
     }
 ]
+
+
+# =========================================================
+# TIME-BASED GREETING
+# =========================================================
+# Uses the real system clock (same time your Windows taskbar shows,
+# bottom-right corner) to decide which greeting to speak/print when
+# the assistant starts up.
+
+def get_time_based_greeting(name: str = "Boss") -> str:
+    """Return a greeting such as 'Good morning Boss' based on the
+    current local time on this machine.
+
+    5:00 AM - 11:59 AM -> Good morning
+    12:00 PM - 4:59 PM -> Good afternoon
+    5:00 PM - 4:59 AM  -> Good evening
+    """
+
+    hour = datetime.datetime.now().hour
+
+    if 5 <= hour < 12:
+        greeting = "Good morning"
+    elif 12 <= hour < 17:
+        greeting = "Good afternoon"
+    else:
+        greeting = "Good evening"
+
+    return f"{greeting} {name}"
 
 
 # =========================================================
@@ -741,6 +783,13 @@ def ChatBotAI(prompt):
             DefaultMessage
         )
 
+        # PERF FIX: cap how much history is resent every turn. Without
+        # this, every reply gets slower as the conversation gets longer
+        # because the model has to read the entire history before it
+        # can start answering.
+        if len(messages) > MAX_HISTORY_MESSAGES:
+            messages = messages[-MAX_HISTORY_MESSAGES:]
+
 
         # =================================================
         # SYSTEM MESSAGE
@@ -764,7 +813,7 @@ def ChatBotAI(prompt):
 
         completion = client.chat.completions.create(
 
-            model="openai/gpt-oss-120b",
+            model=CHAT_MODEL,
 
             messages=(
                 SystemChatBot
@@ -778,15 +827,31 @@ def ChatBotAI(prompt):
                 ]
             ),
 
+            max_tokens=400,
+
             stream=True
         )
 
 
         # =================================================
-        # READ STREAM
+        # READ STREAM + SPEAK AS-WE-GO
         # =================================================
+        # PERF FIX (biggest perceived-speed win): the old code waited
+        # for the ENTIRE answer to finish streaming from Groq before
+        # doing anything at all — only then did TTS start converting
+        # text to speech. That means total wait = full generation time
+        # + full speech-synthesis time, back to back, with the user
+        # hearing nothing the whole time.
+        #
+        # Instead, we flush and speak each finished sentence the moment
+        # it's complete, while the rest of the answer is still being
+        # generated. The user hears the first sentence almost
+        # immediately, and generation + speech now happen in parallel
+        # instead of one after another.
 
         answer = ""
+        _sentence_buffer = ""
+        _sentence_end_chars = (".", "!", "?", "\n")
 
         for chunk in completion:
 
@@ -794,12 +859,31 @@ def ChatBotAI(prompt):
 
                 content = chunk.choices[0].delta.content
 
-                if content:
+                if not content:
+                    continue
 
-                    answer += content
+                answer += content
+                _sentence_buffer += content
+
+                if _sentence_buffer.strip() and _sentence_buffer.strip()[-1] in _sentence_end_chars:
+                    ready = _sentence_buffer.strip()
+                    _sentence_buffer = ""
+                    if ready:
+                        try:
+                            TTS(ready)
+                        except Exception as e:
+                            print(f"[TTS] Error: {e}")
 
             except Exception:
                 continue
+
+        # Speak whatever's left over (a final clause with no closing
+        # punctuation, etc.)
+        if _sentence_buffer.strip():
+            try:
+                TTS(_sentence_buffer.strip())
+            except Exception as e:
+                print(f"[TTS] Error: {e}")
 
 
         # =================================================
@@ -814,7 +898,7 @@ def ChatBotAI(prompt):
 
 
         # =================================================
-        # SAVE CHAT HISTORY
+        # SAVE CHAT HISTORY (kept trimmed — see cap above)
         # =================================================
 
         messages.append(
@@ -830,6 +914,9 @@ def ChatBotAI(prompt):
                 "content": answer
             }
         )
+
+        if len(messages) > MAX_HISTORY_MESSAGES:
+            messages = messages[-MAX_HISTORY_MESSAGES:]
 
 
         try:
@@ -853,25 +940,11 @@ def ChatBotAI(prompt):
 
 
         # =================================================
-        # FINAL ANSWER
+        # FINAL ANSWER (already spoken sentence-by-sentence above,
+        # so we don't call TTS on the whole thing again here)
         # =================================================
 
         final_answer = AnswerModifier(answer)
-
-
-        # =================================================
-        # TTS
-        # =================================================
-
-        if final_answer:
-
-            try:
-
-                TTS(final_answer)
-
-            except Exception as e:
-
-                print(f"[TTS] Error: {e}")
 
 
         return final_answer
@@ -916,6 +989,34 @@ def ChatBotAI(prompt):
 # =========================================================
 
 if __name__ == "__main__":
+
+    # =====================================================
+    # STARTUP GREETING (based on real system time)
+    # This must run FIRST — before any other startup message,
+    # loading, or logic — so it's the very first thing you see
+    # and hear when you hit Run in VS Code.
+    # =====================================================
+
+    startup_greeting = get_time_based_greeting()
+
+    print(
+        f"\n{AssistantName}: {startup_greeting}\n"
+    )
+
+    try:
+
+        TTS(startup_greeting)
+
+    except Exception as e:
+
+        print(
+            f"[TTS] Greeting error: {e}"
+        )
+
+
+    # =====================================================
+    # NORMAL STARTUP INFO (runs AFTER the greeting)
+    # =====================================================
 
     print(
         f"=== {AssistantName} Started ==="

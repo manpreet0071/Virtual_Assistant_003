@@ -119,6 +119,27 @@ try:
 except ImportError:
     pyttsx3 = None
 
+import threading
+
+# PERF FIX: the old SpeakThread called pyttsx3.init() fresh on every
+# single reply. Initializing the TTS engine (loading voice drivers /
+# SAPI on Windows) has real, measurable startup cost — doing it again
+# for every message adds delay before the assistant even starts
+# speaking. Initializing the engine once and reusing it removes that
+# repeated cost from the hot path.
+_pyttsx3_engine = None
+_pyttsx3_lock = threading.Lock()
+
+
+def _get_pyttsx3_engine():
+    global _pyttsx3_engine
+    if pyttsx3 is None:
+        return None
+    with _pyttsx3_lock:
+        if _pyttsx3_engine is None:
+            _pyttsx3_engine = pyttsx3.init()
+    return _pyttsx3_engine
+
 
 class ListenThread(QThread):
     """Continuously listens on the default microphone until stopped,
@@ -186,10 +207,12 @@ class SpeakThread(QThread):
         self.text = text
 
     def run(self):
-        if pyttsx3 is None:
+        engine = _get_pyttsx3_engine()
+        if engine is None:
             self.finished_speaking.emit()
             return
-        engine = pyttsx3.init()
-        engine.say(self.text)
-        engine.runAndWait()
+        # Reused engine instance — no re-init cost per message (see fix above).
+        with _pyttsx3_lock:
+            engine.say(self.text)
+            engine.runAndWait()
         self.finished_speaking.emit()
